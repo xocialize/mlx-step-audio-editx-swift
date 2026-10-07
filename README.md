@@ -37,7 +37,9 @@ re-fit afterwards. The LM regenerates rather than edits in place, so gate the ou
 Weights: [`mlx-community/Step-Audio-EditX-bf16`](https://huggingface.co/mlx-community/Step-Audio-EditX-bf16) — the
 [mlx-speech](https://github.com/appautomaton/mlx-speech) bundle layout (`model.safetensors`, `vq02/vq06`, `flow-*`, `hift`,
 `step-audio-tokenizer-assets` + `*-config.json`, `tokenizer.json`), converted from the stock weights without quantisation;
-the int8 tier is quantised at load (`EditXDTypes.lmQuantBits = 8`). CAM++ ships in the package resources.
+[`mlx-community/Step-Audio-EditX-8bit`](https://huggingface.co/mlx-community/Step-Audio-EditX-8bit) — the int8 tier (LM 8-bit, group 64;
+RTF 0.50, 6.2 GB resident), written by this package from the bf16 bundle and read back by `config.json`'s `quantization`
+(or quantise at load: `EditXDTypes.lmQuantBits = 8`). CAM++ ships in the package resources.
 
 ## Gates
 

@@ -99,6 +99,11 @@ public struct Step1Config: Codable, Sendable {
     public let pad_token_id: Int
     public let eos_token_id: Int
     public let max_seq_len: Int
+    /// Present in a pre-quantised bundle (the published int8 tier): the LM's Linear + Embedding layers are stored as
+    /// MLX affine-quantised weights (`weight` / `scales` / `biases`) — `Step1ForCausalLM.load` quantises the module
+    /// structure to match before the key contract.
+    public let quantization: Quantization?
+    public struct Quantization: Codable, Sendable { public let bits: Int; public let group_size: Int; public let mode: String? }
     public var headDim: Int { hidden_size / num_attention_heads }
 }
 

@@ -7,6 +7,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import StepAudioEditXCore
 
 setvbuf(stdout, nil, _IONBF, 0)   // progress survives a trap
@@ -23,6 +24,7 @@ let goldensDir = URL(fileURLWithPath: option("--goldens") ?? packageRoot.appendi
 let useGPU = flag("--gpu")
 let quantBits = option("--quant").flatMap(Int.init)
 let cuesDir = option("--cues")
+let writeInt8 = option("--write-int8-bundle")
 let bundle = EditXBundle(root: bundleDir)
 let goldenTags = ((try? FileManager.default.contentsOfDirectory(atPath: goldensDir.path)) ?? []).filter { !$0.hasPrefix(".") && $0 != "index.json" }.sorted()
 
@@ -65,9 +67,11 @@ func gateKeys() throws {
     let vq02 = VQ02Model(try ConfigIO.load(VQ02Config.self, from: bundle.file("vq02-config.json")))
     let r2 = try WeightIO.contract(vq02, against: bundle.file("vq02.safetensors"), component: "vq02")
     check(true, "vq02: \(r2.keys) keys, \(r2.bytes / 1_000_000) MB — module paths == safetensors keys, shapes equal")
-    let lm = Step1ForCausalLM(try ConfigIO.load(Step1Config.self, from: bundle.file("config.json")))
+    let lmCfg = try ConfigIO.load(Step1Config.self, from: bundle.file("config.json"))
+    let lm = Step1ForCausalLM(lmCfg)
+    if let q = lmCfg.quantization { quantize(model: lm, groupSize: q.group_size, bits: q.bits) }
     let r3 = try WeightIO.contract(lm, against: bundle.file("model.safetensors"), component: "step1")
-    check(true, "step1: \(r3.keys) keys, \(r3.bytes / 1_000_000) MB — module paths == safetensors keys, shapes equal")
+    check(true, "step1\(lmCfg.quantization.map { " int\($0.bits) g\($0.group_size)" } ?? ""): \(r3.keys) keys, \(r3.bytes / 1_000_000) MB — module paths == safetensors keys, shapes equal")
     let flow = FlowModel(try ConfigIO.load(FlowModelConfig.self, from: bundle.file("flow-model-config.json")))
     let r4 = try WeightIO.contract(flow, against: bundle.file("flow-model.safetensors"), component: "flow", derived: { $0.hasPrefix("decoder.randNoise") })
     check(true, "flow: \(r4.keys) keys, \(r4.bytes / 1_000_000) MB — module paths == safetensors keys, shapes equal")
@@ -262,7 +266,7 @@ func gateE2E() async throws {
     var dt = EditXDTypes(); dt.lmQuantBits = quantBits
     let pipe = try EditXPipeline.load(bundle: bundle, dtypes: dt)
     print(String(format: "  loaded in %.1fs; resident phys_footprint %.2f GB (MLX active %.2f GB)", Date().timeIntervalSince(t0), physFootprintGB(), Double(Memory.activeMemory) / 1e9))
-    let tier = quantBits.map { "int\($0)" } ?? "bf16"
+    let tier = quantBits.map { "int\($0)" } ?? (pipe.lm.isQuantized ? "int\(pipe.lm.config.quantization?.bits ?? 8)-bundle" : "bf16")
     let cues = URL(fileURLWithPath: cuesDir ?? "/Volumes/Satechi/Development/mlxengine-audio/WIP/speech-edit-eval/cues")   // --cues DIR: <id>.wav + cues.tsv (id, lang, speaker, text)
     let text = try String(contentsOf: cues.appendingPathComponent("cues.tsv"), encoding: .utf8).split(separator: "\n").dropFirst()
         .reduce(into: [String: String]()) { d, line in let f = line.split(separator: "\t", omittingEmptySubsequences: false); if f.count >= 4 { d[String(f[0])] = String(f[3]) } }
@@ -276,6 +280,10 @@ func gateE2E() async throws {
         let wall = Date().timeIntervalSince(t)
         try WAV.write(r.waveform, sampleRate: r.sampleRate, to: outDir.appendingPathComponent("\(cue)_\(name)_swift_\(tier).wav"))
         try r.generatedTokens.map(String.init).joined(separator: " ").write(to: outDir.appendingPathComponent("\(cue)_\(name)_swift_\(tier)_tokens.txt"), atomically: true, encoding: .utf8)
+        if tier.hasSuffix("-bundle"), let ref = try? String(contentsOf: outDir.appendingPathComponent("\(cue)_\(name)_swift_int8_tokens.txt"), encoding: .utf8) {
+            let refIds = ref.split(separator: " ").compactMap { Int32($0) }
+            print("    tokens vs the quantise-at-load int8 run (seed 42): \(refIds == r.generatedTokens ? "IDENTICAL (\(refIds.count) ids)" : "differ — \(refIds.count) vs \(r.generatedTokens.count)")")
+        }
         if let ref = try? String(contentsOf: outDir.appendingPathComponent("\(cue)_\(name)_mlx_tokens.txt"), encoding: .utf8) {
             let refIds = ref.split(separator: " ").compactMap { Int32($0) }
             let same = refIds == r.generatedTokens
@@ -290,6 +298,27 @@ func gateE2E() async throws {
     }
 }
 
+// MARK: - tier: write the int8 bundle the package itself produces (bf16 → quantise on the CPU stream → save), so the
+// published files reproduce the quantise-at-load path exactly; every other file is copied from the bf16 bundle
+
+func writeInt8Bundle(to dir: URL, bits: Int = 8, groupSize: Int = 64) throws {
+    print("tier: writing the int\(bits) (group \(groupSize)) bundle from \(bundleDir.lastPathComponent) to \(dir.path)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let lm = try timed("load bf16 + quantise (CPU stream)") { try Step1ForCausalLM.load(bundle: bundle, dtype: .bfloat16, quantBits: bits, groupSize: groupSize) }
+    var arrays = [String: MLXArray]()
+    for (k, v) in lm.parameters().flattened() { arrays[k] = v }
+    try timed("save model.safetensors") { try save(arrays: arrays, metadata: ["format": "mlx"], url: dir.appendingPathComponent("model.safetensors")) }
+    var cfg = try JSONSerialization.jsonObject(with: Data(contentsOf: bundle.file("config.json"))) as? [String: Any] ?? [:]
+    cfg["quantization"] = ["bits": bits, "group_size": groupSize, "mode": "affine"]
+    try JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys]).write(to: dir.appendingPathComponent("config.json"))
+    for f in EditXBundle.requiredFiles where f != "model.safetensors" && f != "config.json" {
+        let dst = dir.appendingPathComponent(f); try? FileManager.default.removeItem(at: dst)
+        try FileManager.default.copyItem(at: bundle.file(f), to: dst)
+    }
+    let bytes = (try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("model.safetensors").path)[.size] as? Int) ?? 0
+    check(bytes > 0, "int\(bits) bundle written: \(arrays.count) LM tensors, \(bytes / 1_000_000) MB model.safetensors, \(EditXBundle.requiredFiles.count) files")
+}
+
 // MARK: - Entry
 
 let all = flag("--all")
@@ -297,6 +326,10 @@ let modes: [(String, () throws -> Void)] = [("--keys", gateKeys), ("--g-vq06", g
 let asyncModes: [(String, () async throws -> Void, Bool)] = [("--prompt", gatePrompt, false), ("--e2e", gateE2E, true)]   // (name, gate, wants the GPU)
 let selected = modes.filter { all || flag($0.0) }
 let selectedAsync = asyncModes.filter { all || flag($0.0) }
+if let dir = writeInt8 {
+    do { try writeInt8Bundle(to: URL(fileURLWithPath: dir)) } catch { print("  ERROR \(error)"); failures.append("\(error)") }
+    print(failures.isEmpty ? "\nALL GATES PASSED" : "\n\(failures.count) FAILURE(S)"); exit(failures.isEmpty ? 0 : 1)
+}
 if selected.isEmpty && selectedAsync.isEmpty { print("usage: editx-gates --keys | --g-vq06 | --g-vq02 | --g-lm | --g-frontend | --g-flow | --g-hift | --prompt | --e2e | --all [--bundle DIR] [--goldens DIR] [--gpu]"); exit(2) }
 do {
     try Device.withDefaultDevice(useGPU ? Device.gpu : Device.cpu) {

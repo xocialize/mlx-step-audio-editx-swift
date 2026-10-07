@@ -163,6 +163,12 @@ public final class Step1ForCausalLM: Module {
     public static func load(bundle: EditXBundle, dtype: DType = .bfloat16, quantBits: Int? = nil, groupSize: Int = 64) throws -> Step1ForCausalLM {
         let cfg = try ConfigIO.load(Step1Config.self, from: bundle.file("config.json"))
         let lm = Step1ForCausalLM(cfg)
+        if let q = cfg.quantization {
+            // a pre-quantised bundle: shape the module tree first, then the on-disk weight / scales / biases load into it
+            quantize(model: lm, groupSize: q.group_size, bits: q.bits)
+            try WeightIO.apply(try WeightIO.load(bundle.file("model.safetensors"), dtype: nil), to: lm, component: "step1 (int\(q.bits))")
+            return lm
+        }
         try WeightIO.apply(try WeightIO.load(bundle.file("model.safetensors"), dtype: dtype), to: lm, component: "step1")
         if let bits = quantBits {
             try Device.withDefaultDevice(.cpu) {
@@ -172,6 +178,8 @@ public final class Step1ForCausalLM: Module {
         }
         return lm
     }
+    /// Whether the loaded LM runs quantised (pre-quantised bundle or quantised at load).
+    public var isQuantized: Bool { model.layers.first.map { $0.attn.qProj is QuantizedLinear } ?? false }
 
     public func makeCaches() -> [Step1LayerCache] { (0 ..< config.num_hidden_layers).map { _ in Step1LayerCache() } }
 
