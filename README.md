@@ -69,9 +69,14 @@ upstream's `vad`. `metaData`: `temperature` (0.7), `flowSteps` (10). Cancellatio
 per stage; `RunProgress` reports the generate phase per token. A take that does not finish within the LM window is
 refused, never returned short. Licence declaration: Apache-2.0 + `funasrModel` (the Paraformer encoder), port code MIT.
 
-Two tiers are declared and measured through the engine (phys_footprint, M5 Max): bf16 9.4 GB resident, int8 6.1 GB;
-≈ 2 GB activation either way (declared 2.5 GB) with the engine's pool cap. `swift test` runs the offline gate (manifest, MAT, CAN,
+Two tiers are declared and measured through the engine (phys_footprint, M5 Max): bf16 10.2 GB resident, int8 6.9 GB
+(the warm-up's residual included); 1.2–1.4 GB activation (declared 2.0 GB) with the engine's pool cap. `swift test` runs the offline gate (manifest, MAT, CAN,
 request plane); `editx-gates --validate [--quant 8] --bundle DIR` drives the real engine path and prints the footprint.
+
+`prepare` ends with a one-second warm-up edit (`StepAudioEditXConfiguration(warmUp:)`, on by default, 0.2.1): MLX
+compiles each Metal kernel the first time a process uses it, which made the first real edit 12–14 s where the steady
+state is 3 s; the warm-up pays that once at load, so the first request runs at the steady RTF. Parity work that times
+the first edit turns it off.
 
 ## Licence
 

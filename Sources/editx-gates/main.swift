@@ -366,7 +366,7 @@ func gateValidate() async throws {
     await engine.evict(package: id)
     let afterEvict = physFootprintGB()
     print(String(format: "  [VAL] %@: resident %.2f GB (phys after load − before), peak phys %.2f GB over the edits (activation %.2f GB), after evict %.2f GB", "\(quant)", afterLoad - before, peak, peak - afterLoad, afterEvict))
-    check(peak - afterLoad < 4.0, "activation \(String(format: "%.2f", peak - afterLoad)) GB within the declared 3.5 GB (+ the pool cap)")
+    check(peak - afterLoad < 4.0, "activation \(String(format: "%.2f", peak - afterLoad)) GB within the declared 2.0 GB (+ the pool cap)")
 }
 
 // MARK: - Entry

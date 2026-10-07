@@ -29,9 +29,9 @@ final class ManifestConformanceTests: XCTestCase {
     func testFootprintsAreTheMeasuredTiers() {
         let footprints = StepAudioEditXPackage.manifest.requirements.footprints
         XCTAssertEqual(footprints.map(\.quant), [.bf16, .int8])
-        XCTAssertGreaterThanOrEqual(footprints[0].residentBytes, 9_400_000_000)        // bf16 phys after load
-        XCTAssertGreaterThanOrEqual(footprints[1].residentBytes, 6_160_000_000)        // int8 phys after load
-        for f in footprints { XCTAssertGreaterThanOrEqual(f.peakActivationBytes, 1_950_000_000) }   // measured through the engine (--validate)
+        XCTAssertGreaterThanOrEqual(footprints[0].residentBytes, 10_190_000_000)       // bf16 phys after load (warm-up incl.)
+        XCTAssertGreaterThanOrEqual(footprints[1].residentBytes, 6_940_000_000)        // int8 phys after load (warm-up incl.)
+        for f in footprints { XCTAssertGreaterThanOrEqual(f.peakActivationBytes, 1_430_000_000) }   // measured through the engine (--validate, 0.2.1)
     }
 
     /// C1 — the package serves `speechEdit` and nothing else, and its surface is born declared (1.50.0).
@@ -90,6 +90,16 @@ final class MaterializationConformanceTests: XCTestCase {
         XCTAssertNil(decoded.modelsRootDirectory)
         XCTAssertEqual(decoded.repo, c.repo)
         XCTAssertEqual(decoded.quant, .int8)
+    }
+
+    /// The load-time warm-up is on by default, survives Codable, and a 0.2.0 configuration without the key decodes on.
+    func testWarmUpDefaultsOnAndDecodesFromOlderConfigurations() throws {
+        XCTAssertTrue(StepAudioEditXConfiguration().warmUp)
+        let off = try JSONDecoder().decode(StepAudioEditXConfiguration.self,
+                                           from: JSONEncoder().encode(StepAudioEditXConfiguration(warmUp: false)))
+        XCTAssertFalse(off.warmUp)
+        let older = Data(#"{"repo":"mlx-community/Step-Audio-EditX-bf16","quant":"bf16"}"#.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(StepAudioEditXConfiguration.self, from: older).warmUp)
     }
 
     private func emptyStoreRoot() -> URL {
@@ -176,6 +186,17 @@ final class RequestPlaneTests: XCTestCase {
 final class CoreStructuralTests: XCTestCase {
 
     func testResampleIdentity() { XCTAssertEqual(Resample.sinc([1, 2, 3], from: 16000, to: 16000), [1, 2, 3]) }
+
+    /// The warm-up signal: one second at 24 kHz, finite, peak 0.3, faded at both ends — a take the package admits.
+    func testWarmUpSignalIsOneBoundedSecond() {
+        let s = EditXPipeline.warmUpSignal()
+        XCTAssertEqual(s.count, 24_000)
+        XCTAssertTrue(s.allSatisfy(\.isFinite))
+        XCTAssertEqual(s.map(abs).max() ?? 0, 0.3, accuracy: 1e-5)
+        XCTAssertEqual(s[0], 0, accuracy: 1e-6)
+        XCTAssertEqual(s[s.count - 1], 0, accuracy: 1e-6)
+        XCTAssertGreaterThan(s[12_000 ... 12_240].map(abs).max() ?? 0, 0.05)   // voiced in the middle, not a fade
+    }
 
     /// The 48-head sqrt-ALiBi slope table: 32 powers of 2^(−8/32) then 16 odd powers of 2^(−4/32) (modeling_step1.py).
     func testAlibiSlopes() {

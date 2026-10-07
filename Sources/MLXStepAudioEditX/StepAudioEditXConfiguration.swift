@@ -22,11 +22,15 @@ public struct StepAudioEditXConfiguration: PackageConfiguration, ModelStorable, 
     public var modelDirectory: URL?
     /// Engine-chosen models root (auto-materialization target). Environment-specific.
     public var modelsRootDirectory: URL?
+    /// Run a one-second edit at load (≈ 10 s, once per process) so the first real edit runs at the steady RTF
+    /// instead of paying the Metal kernel compile (AB-R-0420). Off for parity work that times the first edit.
+    public var warmUp: Bool
 
     public init(repo: String = "mlx-community/Step-Audio-EditX-bf16", revision: String? = nil, quant: Quant = .bf16,
-                modelDirectory: URL? = nil, modelsRootDirectory: URL? = nil) {
+                modelDirectory: URL? = nil, modelsRootDirectory: URL? = nil, warmUp: Bool = true) {
         self.repo = repo; self.revision = revision; self.quant = quant
         self.modelDirectory = modelDirectory; self.modelsRootDirectory = modelsRootDirectory
+        self.warmUp = warmUp
     }
 
     /// The repo backing the configured tier. fp32 upcasts the bf16 bundle, so it materializes the same files.
@@ -46,13 +50,14 @@ public struct StepAudioEditXConfiguration: PackageConfiguration, ModelStorable, 
     }
 
     // Environment-specific URLs are excluded from Codable.
-    private enum CodingKeys: String, CodingKey { case repo, revision, quant }
+    private enum CodingKeys: String, CodingKey { case repo, revision, quant, warmUp }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         repo = try c.decode(String.self, forKey: .repo)
         revision = try c.decodeIfPresent(String.self, forKey: .revision)
         quant = try c.decode(Quant.self, forKey: .quant)
+        warmUp = try c.decodeIfPresent(Bool.self, forKey: .warmUp) ?? true
     }
 }
 

@@ -32,12 +32,13 @@ public final class StepAudioEditXPackage: ModelPackage {
     public typealias Configuration = StepAudioEditXConfiguration
 
     /// Split footprints, MEASURED as phys_footprint THROUGH THE ENGINE (`editx-gates --validate`: MLXServeEngine register →
-    /// prepare → three edits → evict, M5 Max, 2026-10-07, PORTING-SPEC S7), pool-inclusive as the fleet declares
-    /// (AB-L-0113 / AB-L-0155): bf16 phys +9.44 GB after prepare, 11.40 GB at the highest reading over 5–8.5 s edits →
-    /// 1.95 GB activation; int8 +6.14 GB, 8.09 GB → 1.94 GB. Declared with headroom.
-    nonisolated static let bf16ResidentBytes: UInt64 = 9_500_000_000
-    nonisolated static let int8ResidentBytes: UInt64 = 6_300_000_000
-    nonisolated static let peakActivationBytes: UInt64 = 2_500_000_000
+    /// prepare (incl. the one-second warm-up edit, cache cleared after) → three edits → evict, M5 Max, 2026-10-07,
+    /// PORTING-SPEC S7, v0.2.1), pool-inclusive as the fleet declares (AB-L-0113 / AB-L-0155): bf16 phys +10.19 GB after
+    /// prepare, 11.39 GB at the highest reading over 5–8.5 s edits → 1.19 GB activation; int8 +6.94 GB, 8.37 GB → 1.43 GB.
+    /// The warm-up leaves ≈ 0.8 GB resident that 0.2.0 counted as activation; the peaks did not move. Declared with headroom.
+    nonisolated static let bf16ResidentBytes: UInt64 = 10_300_000_000
+    nonisolated static let int8ResidentBytes: UInt64 = 7_000_000_000
+    nonisolated static let peakActivationBytes: UInt64 = 2_000_000_000
 
     /// Upstream's vocabularies (`config/edit_config.py`; the paralinguistic tags from the reference UI).
     public nonisolated static let emotionLabels = [
@@ -126,6 +127,19 @@ public final class StepAudioEditXPackage: ModelPackage {
             throw StepAudioEditXPackageError.missingWeights("unresolved bundle directory (no store root)")
         }
         pipeline = try EditXPipeline.load(bundle: EditXBundle(root: dir), dtypes: configuration.dtypes)
+        // A one-second edit compiles every Metal kernel the real edits use (≈ 10 s, once per process — AB-R-0420),
+        // so the first request runs at the steady RTF. Its outcome is discarded; only cancellation propagates.
+        if configuration.warmUp {
+            do {
+                try pipeline?.warmUp(checkpoint: { try Task.checkCancellation() })
+                MLX.Memory.clearCache()   // the compiled kernels stay; the warm-up's pool must not read as resident weights
+            } catch is CancellationError {
+                pipeline = nil
+                throw CancellationError()
+            } catch {
+                // A failed warm-up is not a failed load: the first real edit simply pays the compile.
+            }
+        }
     }
 
     public func unload() async {
