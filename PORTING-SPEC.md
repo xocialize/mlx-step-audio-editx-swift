@@ -4,6 +4,13 @@ Step-Audio-EditX (StepFun, Apache-2.0) → Swift-MLX. Evaluation, licence proven
 `mlxengine-audio/Docs/ENHANCEMENTS.md` **E19** (AB-D-0113, receipts AB-R-0409 / AB-R-0412 / AB-R-0413); this file is
 the port's contract and its gate record. Task AB-T-0202.
 
+## Published
+
+- Code: [xocialize/mlx-step-audio-editx-swift](https://github.com/xocialize/mlx-step-audio-editx-swift) — `v0.1.0`
+  (2026-10-07): Core + gates, parity-locked; `MLXStepAudioEditX` is a placeholder until `Capability.speechEdit`.
+- Weights: [mlx-community/Step-Audio-EditX-bf16](https://huggingface.co/mlx-community/Step-Audio-EditX-bf16) — the bf16
+  bundle this package consumes (8.0 GB; the int8 tier is quantised at load). The gate record below was measured on it.
+
 ## Upstream
 
 | piece | source | licence | pinned |
