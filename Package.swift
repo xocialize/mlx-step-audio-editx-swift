@@ -12,7 +12,7 @@
 //   • Flow       — CosyVoice-lineage conditioner + upsample conformer + DiT CFM (10 steps, cfg 0.7) → 50 Hz mel.
 //   • Vocoder    — HiFT (NSF harmonic source + iSTFT) → 24 kHz.
 //   • Speaker    — CAM++ (lifted from mlx-indextts2-swift — the same checkpoint, already parity-locked).
-//   • MLXStepAudioEditX — the engine-facing package (awaits `Capability.speechEdit`, ask filed from AB-T-0202 V3).
+//   • MLXStepAudioEditX — the engine-facing package on `Capability.speechEdit` (contract 1.50.0, AB-A-0137).
 //   • editx-gates — parity gates against goldens from the torch fp32 oracle (Tools/oracle-capture), plus a render lane.
 import PackageDescription
 
@@ -29,7 +29,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.5"),
         .package(url: "https://github.com/xocialize/mlx-audio-dsp.git", from: "0.1.0"),
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.64.0"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.65.0"),
     ],
     targets: [
         .target(
@@ -74,7 +74,9 @@ let package = Package(
             dependencies: [
                 "StepAudioEditXCore", "MLXStepAudioEditX",
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLXServeCore", package: "mlx-engine-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
             ],
             path: "Sources/editx-gates",

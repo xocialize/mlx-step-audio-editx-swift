@@ -50,8 +50,28 @@ stream, against the torch fp32 oracle goldens in `Tests/Goldens` — not in the 
 
 ## Engine
 
-`MLXStepAudioEditX` becomes the engine-facing package once `Capability.speechEdit` lands (ask filed from AB-T-0202 V3);
-until then the Core is consumed directly.
+`MLXStepAudioEditX` is the engine-facing package on `Capability.speechEdit` (mlx-engine-swift ≥ 0.65.0, contract 1.50.0):
+
+```swift
+import MLXServeCore
+import MLXStepAudioEditX
+
+let id = try await engine.register(StepAudioEditXPackage.registration,
+                                   configuration: StepAudioEditXConfiguration(quant: .int8))   // .bf16 default
+try await engine.prepare(.speechEdit, package: id)   // materializes mlx-community/Step-Audio-EditX-8bit into the store
+let r = try await engine.run(SpeechEditRequest(audio: take, transcript: line, edit: .style("whisper"), seed: 42), package: id)
+let out = r as! SpeechEditResponse       // out.audio (24 kHz .wav), out.transcript (what the take should now say)
+```
+
+The surface declares everything the engine admits: the five operations, upstream's 15 emotion labels (incl. `remove`),
+33 style labels, 10 paralinguistic tags, and a 90 s input ceiling (`StepAudioEditXPackage.controls`). `.trimSilence` is
+upstream's `vad`. `metaData`: `temperature` (0.7), `flowSteps` (10). Cancellation is honoured per generated token and
+per stage; `RunProgress` reports the generate phase per token. A take that does not finish within the LM window is
+refused, never returned short. Licence declaration: Apache-2.0 + `funasrModel` (the Paraformer encoder), port code MIT.
+
+Two tiers are declared and measured through the engine (phys_footprint, M5 Max): bf16 9.4 GB resident, int8 6.1 GB;
+≈ 2 GB activation either way (declared 2.5 GB) with the engine's pool cap. `swift test` runs the offline gate (manifest, MAT, CAN,
+request plane); `editx-gates --validate [--quant 8] --bundle DIR` drives the real engine path and prints the footprint.
 
 ## Licence
 

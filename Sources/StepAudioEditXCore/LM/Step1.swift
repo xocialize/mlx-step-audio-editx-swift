@@ -191,13 +191,13 @@ public final class Step1ForCausalLM: Module {
     /// `_generate_audio_tokens`: prefill, then sample at `temperature` until EOS or `maxNewTokens`; returns every
     /// generated id (audio ids are ≥ `audioTokenBase`; the caller strips the rest). `checkpoint` runs per token.
     public func generate(prompt: [Int32], maxNewTokens: Int, temperature: Float, eosTokenId: Int32,
-                         checkpoint: (() throws -> Void)? = nil) rethrows -> [Int32] {
+                         checkpoint: (() throws -> Void)? = nil, onToken: ((Int) -> Void)? = nil) rethrows -> [Int32] {
         let caches = makeCaches()
         var logits = self(MLXArray(prompt).reshaped([1, -1]), caches: caches)[0..., -1, 0...]
         eval(logits)
         var out = [Int32]()
-        for _ in 0 ..< maxNewTokens {
-            try checkpoint?()
+        for step in 0 ..< maxNewTokens {
+            try checkpoint?(); onToken?(step)
             let next: Int32
             if temperature <= 0 { next = argMax(logits, axis: -1).item(Int32.self) }
             else { next = MLXRandom.categorical(logits.asType(.float32) / temperature, axis: -1).item(Int32.self) }

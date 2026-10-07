@@ -8,6 +8,9 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXServeCore
+import MLXToolKit
+import MLXStepAudioEditX
 import StepAudioEditXCore
 
 setvbuf(stdout, nil, _IONBF, 0)   // progress survives a trap
@@ -319,18 +322,65 @@ func writeInt8Bundle(to dir: URL, bits: Int = 8, groupSize: Int = 64) throws {
     check(bytes > 0, "int\(bits) bundle written: \(arrays.count) LM tensors, \(bytes / 1_000_000) MB model.safetensors, \(EditXBundle.requiredFiles.count) files")
 }
 
+// MARK: - validate: the consumer path — MLXServeEngine (DEFAULT policy) register → prepare → run → evict, the exact
+// call sequence a Studio makes; phys_footprint read at each step (the manifest's C-memory numbers). The bundle is given
+// explicitly (--bundle) so the lane measures without an 8 GB download; the MAT path is the engine's.
+
+func gateValidate() async throws {
+    let quant: Quant = quantBits == 8 ? .int8 : .bf16
+    print("validate: MLXServeEngine → register → prepare → run (\(quant)) → evict; bundle \(bundleDir.path)")
+    let engine = MLXServeEngine()   // .permissiveOnly — the weights must admit here, no acknowledgement
+    let t0 = Date()
+    let id = try await engine.register(StepAudioEditXPackage.registration,
+                                       configuration: StepAudioEditXConfiguration(quant: quant, modelDirectory: bundleDir),
+                                       id: PackageID("step-audio-editx"))
+    let advisories = await engine.licenseAdvisories
+    check(advisories.isEmpty, "registered \(id.rawValue) under .permissiveOnly; licence advisories: \(advisories.count)")
+    let needs = await engine.needsDownload(.speechEdit, package: id)
+    check(!needs, "needsDownload == \(needs) with the explicit bundle")
+    let before = physFootprintGB()
+    try await engine.prepare(.speechEdit, package: id)
+    let afterLoad = physFootprintGB()
+    print(String(format: "  [VAL] prepared in %.1fs; phys_footprint %.2f → %.2f GB (resident +%.2f)", Date().timeIntervalSince(t0), before, afterLoad, afterLoad - before))
+    let cues = URL(fileURLWithPath: cuesDir ?? "/Volumes/Satechi/Development/mlxengine-audio/WIP/speech-edit-eval/cues")
+    let text = try String(contentsOf: cues.appendingPathComponent("cues.tsv"), encoding: .utf8).split(separator: "\n").dropFirst()
+        .reduce(into: [String: String]()) { d, line in let f = line.split(separator: "\t", omittingEmptySubsequences: false); if f.count >= 4 { d[String(f[0])] = String(f[3]) } }
+    var peak = afterLoad
+    for (cue, edit, label) in [("en01", SpeechEditOperation.emotion("angry"), "angry"), ("zh05", .paralinguistic(targetTranscript: text["zh05"]!.replacingOccurrences(of: "？", with: "？[Laughter]", options: [], range: text["zh05"]!.range(of: "？"))), "laughter"), ("en01", .trimSilence, "trim")] {
+        let wav = try Data(contentsOf: cues.appendingPathComponent("\(cue).wav"))
+        let t = Date()
+        let response = try await engine.run(SpeechEditRequest(audio: Audio(format: .wav, data: wav, sampleRate: 24_000, channels: 1), transcript: text[cue]!, edit: edit, seed: 42), package: id)
+        guard let r = response as? SpeechEditResponse else { failures.append("unexpected response"); return }
+        let samples = r.audio.data.dropFirst(44).withUnsafeBytes { raw -> [Float] in raw.bindMemory(to: Int16.self).map { Float($0) / 32768 } }
+        let secs = Double(samples.count) / Double(r.audio.sampleRate ?? 24_000)
+        let rms = 20 * log10(max(sqrt(samples.map { $0 * $0 }.reduce(0, +) / Float(max(samples.count, 1))), 1e-9))
+        let foot = physFootprintGB(); peak = max(peak, foot)
+        check(secs > 1 && rms > -40 && rms < -5, String(format: "  [RUN] %@ %@: %.2fs audio, %.1f dBFS, %.1fs wall (rtf %.2f), transcript %d chars, phys_footprint %.2f GB", cue, label, secs, rms, Date().timeIntervalSince(t), Date().timeIntervalSince(t) / max(secs, 0.01), r.transcript.count, foot))
+        try r.audio.data.write(to: goldensDir.appendingPathComponent("_out").appendingPathComponent("\(cue)_\(label)_engine_\(quant).wav"))
+    }
+    // the engine refuses an undeclared label before admission
+    do {
+        _ = try await engine.run(SpeechEditRequest(audio: Audio(format: .wav, data: Data([1, 2, 3]), sampleRate: 24_000, channels: 1), transcript: "x", edit: .emotion("furious")), package: id)
+        check(false, "the engine admitted an undeclared emotion label")
+    } catch { check(true, "undeclared label refused before admission: \(String(describing: error).prefix(120))") }
+    await engine.evict(package: id)
+    let afterEvict = physFootprintGB()
+    print(String(format: "  [VAL] %@: resident %.2f GB (phys after load − before), peak phys %.2f GB over the edits (activation %.2f GB), after evict %.2f GB", "\(quant)", afterLoad - before, peak, peak - afterLoad, afterEvict))
+    check(peak - afterLoad < 4.0, "activation \(String(format: "%.2f", peak - afterLoad)) GB within the declared 3.5 GB (+ the pool cap)")
+}
+
 // MARK: - Entry
 
 let all = flag("--all")
 let modes: [(String, () throws -> Void)] = [("--keys", gateKeys), ("--g-vq06", gateVQ06), ("--g-vq02", gateVQ02), ("--g-lm", gateLM), ("--g-frontend", gateFrontend), ("--g-flow", gateFlow), ("--g-hift", gateHiFT)]
-let asyncModes: [(String, () async throws -> Void, Bool)] = [("--prompt", gatePrompt, false), ("--e2e", gateE2E, true)]   // (name, gate, wants the GPU)
+let asyncModes: [(String, () async throws -> Void, Bool)] = [("--prompt", gatePrompt, false), ("--e2e", gateE2E, true), ("--validate", gateValidate, true)]   // (name, gate, wants the GPU)
 let selected = modes.filter { all || flag($0.0) }
 let selectedAsync = asyncModes.filter { all || flag($0.0) }
 if let dir = writeInt8 {
     do { try writeInt8Bundle(to: URL(fileURLWithPath: dir)) } catch { print("  ERROR \(error)"); failures.append("\(error)") }
     print(failures.isEmpty ? "\nALL GATES PASSED" : "\n\(failures.count) FAILURE(S)"); exit(failures.isEmpty ? 0 : 1)
 }
-if selected.isEmpty && selectedAsync.isEmpty { print("usage: editx-gates --keys | --g-vq06 | --g-vq02 | --g-lm | --g-frontend | --g-flow | --g-hift | --prompt | --e2e | --all [--bundle DIR] [--goldens DIR] [--gpu]"); exit(2) }
+if selected.isEmpty && selectedAsync.isEmpty { print("usage: editx-gates --keys | --g-vq06 | --g-vq02 | --g-lm | --g-frontend | --g-flow | --g-hift | --prompt | --e2e | --validate | --all [--bundle DIR] [--goldens DIR] [--gpu]"); exit(2) }
 do {
     try Device.withDefaultDevice(useGPU ? Device.gpu : Device.cpu) {
         for (name, gate) in selected { print("\n== \(name)"); try gate() }

@@ -78,11 +78,13 @@ public final class EditXPipeline {
     }
 
     func synthesize(promptIds: [Int32], promptTokens: [Int32], capped: [Float], sampleRate: Int, seed: UInt64?, temperature: Float,
-                    maxNewTokens: Int?, flowSteps: Int, timings: inout [String: Double], checkpoint: (() throws -> Void)?) throws -> EditResult {
+                    maxNewTokens: Int?, flowSteps: Int, timings: inout [String: Double], checkpoint: (() throws -> Void)?,
+                    onToken: ((Int, Int) -> Void)? = nil) throws -> EditResult {
         if let seed { MLXRandom.seed(seed) }
         let limit = min(maxNewTokens ?? Int.max, max(Self.totalSequenceLimit - promptIds.count, 1), lm.config.max_seq_len - promptIds.count)
         var t0 = Date()
-        let generated = try lm.generate(prompt: promptIds, maxNewTokens: limit, temperature: temperature, eosTokenId: Int32(lm.config.eos_token_id), checkpoint: checkpoint)
+        let generated = try lm.generate(prompt: promptIds, maxNewTokens: limit, temperature: temperature, eosTokenId: Int32(lm.config.eos_token_id),
+                                        checkpoint: checkpoint, onToken: onToken.map { f in { f($0, limit) } })
         timings["lm"] = Date().timeIntervalSince(t0)
         let audio = generated.filter { $0 >= tokenizer.audioTokenBase }.map { $0 - tokenizer.audioTokenBase }
         guard !audio.isEmpty else { throw StepAudioEditXError.invalidInput("the LM produced no audio tokens (\(generated.count) ids)") }
@@ -103,7 +105,8 @@ public final class EditXPipeline {
 
     /// `edit`: re-deliver `wav` (its transcript `text`) per `edit`.
     public func edit(_ wav: [Float], sampleRate: Int, text: String, edit: SpeechEdit, seed: UInt64? = 42, temperature: Float = 0.7,
-                     maxNewTokens: Int? = nil, flowSteps: Int = 10, checkpoint: (() throws -> Void)? = nil) throws -> EditResult {
+                     maxNewTokens: Int? = nil, flowSteps: Int = 10, checkpoint: (() throws -> Void)? = nil,
+                     onToken: ((Int, Int) -> Void)? = nil) throws -> EditResult {
         try checkpoint?()
         var timings = [String: Double](); var t0 = Date()
         let capped = Self.capPeak(wav)
@@ -113,7 +116,7 @@ public final class EditXPipeline {
                                                 audioTokenString: EditXTokenizer.audioTokenString(promptTokens))
         timings["prompt"] = Date().timeIntervalSince(t0)
         return try synthesize(promptIds: promptIds, promptTokens: promptTokens, capped: capped, sampleRate: sampleRate, seed: seed, temperature: temperature,
-                              maxNewTokens: maxNewTokens, flowSteps: flowSteps, timings: &timings, checkpoint: checkpoint)
+                              maxNewTokens: maxNewTokens, flowSteps: flowSteps, timings: &timings, checkpoint: checkpoint, onToken: onToken)
     }
 
     /// `clone`: zero-shot TTS of `targetText` in the voice of `wav` (its transcript `promptText`).
